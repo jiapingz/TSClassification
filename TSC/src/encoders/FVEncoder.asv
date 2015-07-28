@@ -1,0 +1,146 @@
+% encode time series using fisher vector
+
+% (1) first fit a gmm;
+% (2) and then get the fisher vector
+
+% (1) fit gmm
+
+addpath(genpath('..\libsvm-3.18\matlab'));
+addpath(genpath('.\confusion-matrix'));
+trainTestDataFile  =  'F:\USC-projects\google-glass-project\psu-data\BoW\TrainTestdata2.mat';
+load(trainTestDataFile);
+
+% in this scenario, we directly classify sequences in a time series, and
+% then use majority voting to determine the class of each activity
+
+train_data  =   [];
+train_label =   [];
+nTrainActivities  =   size(bofTrain,1);
+nTestActivities   =   size(bofTest,1);
+
+nSeq_Acti_train = zeros(1, nTrainActivities);
+
+for i=1:nTrainActivities
+    train_data      = [train_data; cell2mat(bofTrain{i})];
+    nSequences      = size(bofTrain{i},1);
+    train_label     = [train_label; labelTrain(i)*ones(nSequences,1)];
+    nSeq_Acti_train = [nSeq_Acti_train nSequences];
+end
+
+nSeq_Acti_train_Idx = [0 cumsum(nSeq_Acti_train)];
+
+K = 5;
+dims = size(train_data,2);
+
+GMModel = gmdistribution.fit(train_data,K, 'Regularize', 0.01, ...
+                                 'CovType', 'diagonal',  'Replicates', 2);
+mu          = GMModel.mu;
+covMats     = GMModel.Sigma;
+w           = GMModel.PComponents;
+icovMats    = 1./covMats;
+icovMats0_5 = sqrt(1./covMats);
+
+%% ===============================================================
+%% fisher vector of training activities
+
+% 1.1 soft assignment
+nSeqTrain = size(train_data,1);
+probTrain = zeros(nSeqTrain,K);
+for i=1:nSeqTrain
+    fe = train_data(i,:);
+    for j=1:K
+        kcovMat = covMats(:,:,j);
+        det_kcovMat = squeeze(kcovMat) * ones(dims,1);
+        i_kcovMat = diag(1./sqeeze(kcovMat));
+        probTrain(i,j) = 1/sqrt(det_kcovMat*(2*pi)^dims) * ...
+                exp(-0.5*(fe-mu(j,:))*i_kcovMat*(fe-mu(j,:))');
+    end
+end
+nProbTrain = probTrain./repmat(sum(probTrain,2),1,K);
+
+% 1.2 vector encoding
+nActivityTrain = size(bofTrain,1);
+uTrain = zeros(nActivityTrain, dims*K);
+vTrain = zeros(nActivityTrain, dims*K);
+for i=1:nActivityTrain
+    sidx = nSeq_Acti_train_Idx(i)+1;
+    eidx = nSeq_Acti_train_Idx(i+1);
+    nSeqs = eidx - sidx + 1;
+
+    for k=1:K
+        sigmaK = squeeze(covMats(:,:,k));
+        muK = mu(k,:);
+        wK = w(k);
+        for j=sidx:eidx
+            ijTrainData = train_data(j,:);
+            pk = nProbTrain(j,k);
+            uTrain(i,(k-1)*dims+1:k*dims) = uTrain(i,(k-1)*dims+1:k*dims) + ...
+                    pk*(ijTrainData - muK)./sqrt(sigmaK);
+
+            vTrain(i,(k-1)*dims+1:k*dims) = vTrain(i,(k-1)*dims+1:k*dims) + ...
+                pk*((ijTrainData - muK).^2./sigmaK-1);
+        end
+        uTrain(i,(k-1)*dims+1:k*dims) = uTrain(i,(k-1)*dims+1:k*dims)/(nSeqs*sqrt(wK));
+        vTrain(i,(k-1)*dims+1:k*dims) = vTrain(i,(k-1)*dims+1:k*dims)/(nSeqs*sqrt(2*wK));
+        
+    end    
+end
+
+%% ===============================================================
+%% fisher vector of testing activities
+
+test_data = [];
+test_label = [];
+test_activities_idx = [];
+nSeq_Acti_test = zeros(1, nTestActivities);
+for i=1:nTestActivities
+    test_data = [test_data; cell2mat(bofTest{i})];
+    nSequences = size(bofTest{i},1);
+    nSeq_Acti_test = [nSeq_Acti_test  nSequences]; 
+    test_label = [test_label; labelTest(i)*ones(nSequences,1)];
+
+end
+nSeq_Acti_test_Idx = [0 cumsum(nSeq_Acti_test)];
+
+% 1.1 soft assignment
+nSeqTest =  size(test_data,1);
+probTest = zeros(nSeqTest,K);
+for i=1:nSeqTrain
+    fe = test_data(i,:);
+    for j=1:K
+        kcovMat = covMats(:,:,j);
+        det_kcovMat = squeeze(kcovMat) * ones(dims,1);
+        i_kcovMat = diag(1./sqeeze(kcovMat));
+        probTest(i,j) = 1/sqrt(det_kcovMat*(2*pi)^dims) * ...
+                exp(-0.5*(fe-mu(j,:))*i_kcovMat*(fe-mu(j,:))');
+    end
+end
+nProbTest = probTest./repmat(sum(probTest,2),1,K);
+
+% 1.2 vector encoding
+nActivityTest = size(bofTest,1);
+uTest = zeros(nActivityTest, dims*K);
+vTest = zeros(nActivityTest, dims*K);
+for i=1:nActivityTest
+    sidx = nSeq_Acti_test_Idx(i)+1;
+    eidx = nSeq_Acti_test_Idx(i+1);
+    nSeqs = eidx - sidx + 1;
+
+    for k=1:K
+        sigmaK = squeeze(covMats(:,:,k));
+        muK = mu(k,:);
+        wK = w(k);
+        for j=sidx:eidx
+            ijTestData = test_data(j,:);
+            pk = nProbTest(j,k);
+            uTest(i,(k-1)*dims+1:k*dims) = uTest(i,(k-1)*dims+1:k*dims) + ...
+                    pk*(ijTestData - muK)./sqrt(sigmaK);
+
+            vTest(i,(k-1)*dims+1:k*dims) = vTest(i,(k-1)*dims+1:k*dims) + ...
+                pk*((ijTestData - muK).^2./sigmaK-1);
+        end
+        uTest(i,(k-1)*dims+1:k*dims) = uTrain(i,(k-1)*dims+1:k*dims)/(nSeqs*sqrt(wK));
+        vTrain(i,(k-1)*dims+1:k*dims) = vTrain(i,(k-1)*dims+1:k*dims)/(nSeqs*sqrt(2*wK));
+        
+    end    
+end
